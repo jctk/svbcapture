@@ -11,10 +11,14 @@ CXX := g++
 CXXFLAGS := -std=c++11 -I./include -g -O0 -fno-omit-frame-pointer -DDEBUG
 LDLIBS := -Wl,-rpath=./lib/x64 -pthread -lstdc++ -L./lib/x64 -lSVBCameraSDK -lusb-1.0
 
-OPENCV_CFLAGS := -I/usr/include/opencv4
-OPENCV_LIBS   := -L/usr/lib/x86_64-linux-gnu -lopencv_core -lopencv_imgproc -lopencv_highgui
+SYSTEM_PKG_CONFIG_LIBDIR := /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+OPENCV_CFLAGS := $(shell PKG_CONFIG_LIBDIR=$(SYSTEM_PKG_CONFIG_LIBDIR) pkg-config --cflags opencv4)
+OPENCV_LIBS   := $(shell PKG_CONFIG_LIBDIR=$(SYSTEM_PKG_CONFIG_LIBDIR) pkg-config --libs opencv4)
 
 all: $(TARGETS)
+
+run: ./build/svbcapture
+	LIBGL_ALWAYS_SOFTWARE=1 QT_XCB_GL_INTEGRATION=none ./build/svbcapture
 
 ./build/svbcapture.o: CXXFLAGS += $(OPENCV_CFLAGS)
 ./build/svbcapture:   LDLIBS   += $(OPENCV_LIBS)
@@ -32,6 +36,6 @@ clean:
 distclean:
 	rm -rf *.bin
 
-.PHONY: all clean distclean
+.PHONY: all run clean distclean
 
 
