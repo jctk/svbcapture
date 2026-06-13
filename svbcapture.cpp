@@ -6,6 +6,7 @@
 #include <climits>
 #include <csignal>
 #include <ctime>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -56,6 +57,159 @@ static void HandleSignal(int sig)
 	}
 }
 
+/*
+ * parse command line arguments
+ * --camera-index <index>: specify which camera to use (default: 0)
+ * --camera-mode <normal|trigger>: camera mode (default: normal)
+ * --exp <seconds>: exposure time in seconds (default: 0.5)
+ * --gain <0-500>: gain value (default: 100)
+ * --offset <0-100>: offset value (default: 20)
+ * --ratio <0.1-1.0>: display scale factor (default: 0.25)
+ * example: svbcontrols --camera-index 1
+*/
+class CommandLineOptions
+{
+public:
+	int cameraIndex;
+	SVB_CAMERA_MODE cameraMode;
+	double exposureSeconds;
+	int gainValue;
+	int offsetValue;
+	double displayRatio;
+
+	CommandLineOptions()
+		: cameraIndex(-1)
+		, cameraMode(SVB_MODE_NORMAL)
+		, exposureSeconds(0.5)
+		, gainValue(100)
+		, offsetValue(20)
+		, displayRatio(0.25)
+	{
+	}
+
+	static CommandLineOptions Parse(int argc, char* argv[])
+	{
+		CommandLineOptions options;
+
+		for (int i = 1; i < argc; i++)
+		{
+			if (strcmp(argv[i], "--camera-index") == 0)
+			{
+				if (i + 1 >= argc)
+				{
+					throw std::runtime_error("missing value for --camera-index");
+				}
+
+				char* endPtr = NULL;
+				long parsedCameraIndex = strtol(argv[++i], &endPtr, 10);
+				if (endPtr == argv[i] || *endPtr != '\0' || parsedCameraIndex < 0 || parsedCameraIndex > INT_MAX)
+				{
+					throw std::runtime_error(std::string("invalid --camera-index: ") + argv[i] + " (must be a non-negative integer)");
+				}
+
+				options.cameraIndex = static_cast<int>(parsedCameraIndex);
+			}
+			else if (strcmp(argv[i], "--camera-mode") == 0)
+			{
+				if (i + 1 >= argc)
+				{
+					throw std::runtime_error("missing value for --camera-mode");
+				}
+
+				const char* mode = argv[++i];
+				if (strcmp(mode, "video") == 0)
+				{
+					options.cameraMode = SVB_MODE_NORMAL;
+				}
+				else if (strcmp(mode, "image") == 0)
+				{
+					options.cameraMode = SVB_MODE_TRIG_SOFT;
+				}
+				else
+				{
+					throw std::runtime_error(std::string("invalid --camera-mode: ") + mode + " (use video or image)");
+				}
+			}
+			else if (strcmp(argv[i], "--exp") == 0)
+			{
+				if (i + 1 >= argc)
+				{
+					throw std::runtime_error("missing value for --exp");
+				}
+
+				char* endPtr = NULL;
+				double parsedExposure = strtod(argv[++i], &endPtr);
+				if (endPtr == argv[i] || *endPtr != '\0' || parsedExposure <= 0.0)
+				{
+					throw std::runtime_error(std::string("invalid --exp: ") + argv[i] + " (must be a number greater than 0)");
+				}
+
+				options.exposureSeconds = parsedExposure;
+			}
+			else if (strcmp(argv[i], "--gain") == 0)
+			{
+				if (i + 1 >= argc)
+				{
+					throw std::runtime_error("missing value for --gain");
+				}
+
+				char* endPtr = NULL;
+				long parsedGain = strtol(argv[++i], &endPtr, 10);
+				if (endPtr == argv[i] || *endPtr != '\0' || parsedGain < 0 || parsedGain > 500)
+				{
+					throw std::runtime_error(std::string("invalid --gain: ") + argv[i] + " (must be an integer between 0 and 500)");
+				}
+
+				options.gainValue = static_cast<int>(parsedGain);
+			}
+			else if (strcmp(argv[i], "--offset") == 0)
+			{
+				if (i + 1 >= argc)
+				{
+					throw std::runtime_error("missing value for --offset");
+				}
+
+				char* endPtr = NULL;
+				long parsedOffset = strtol(argv[++i], &endPtr, 10);
+				if (endPtr == argv[i] || *endPtr != '\0' || parsedOffset < 0 || parsedOffset > 100)
+				{
+					throw std::runtime_error(std::string("invalid --offset: ") + argv[i] + " (must be an integer between 0 and 100)");
+				}
+
+				options.offsetValue = static_cast<int>(parsedOffset);
+			}
+			else if (strcmp(argv[i], "--ratio") == 0)
+			{
+				if (i + 1 >= argc)
+				{
+					throw std::runtime_error("missing value for --ratio");
+				}
+
+				char* endPtr = NULL;
+				double parsedRatio = strtod(argv[++i], &endPtr);
+				if (endPtr == argv[i] || *endPtr != '\0' || parsedRatio < 0.1 || parsedRatio > 1.0)
+				{
+					throw std::runtime_error(std::string("invalid --ratio: ") + argv[i] + " (must be a number between 0.1 and 1.0)");
+				}
+
+				options.displayRatio = parsedRatio;
+			}
+			else
+			{
+				throw std::runtime_error(std::string("unknown option: ") + argv[i]);
+			}
+		}
+
+		if (options.cameraIndex < 0)
+		{
+			throw std::runtime_error(std::string("missing required option --camera-index\nusage: ") + argv[0] +
+				" --camera-index <index> [--camera-mode <video|image>] [--exp <seconds>] [--gain <0-500>] [--offset <0-100>] [--ratio <0.1-1.0>]");
+		}
+
+		return options;
+	}
+};
+
 // Helper function to determine bytes per pixel based on the image type
 static size_t BytesPerPixelFromImageType(SVB_IMG_TYPE imgType)
 {
@@ -97,152 +251,9 @@ static void PrintTimestampedFrameInfo(const char* label, size_t frameSize)
 	fflush(stdout);
 }
 
-// Main function to initialize the camera, set parameters, and start the capture loop
-int main(int argc, char* argv[])
+static int PrintCameraProperty(int cameraID, SVB_CAMERA_PROPERTY& cameraProperty)
 {
-	// Register the signal handler for SIGINT to allow graceful shutdown when Ctrl+C is pressed
-	signal(SIGINT, HandleSignal);
-
-	/*
-	 * parse command line arguments
-	 * --camera-index <index>: specify which camera to use (default: 0)
-	 * --camera-mode <normal|trigger>: camera mode (default: normal)
-	 * --exp <seconds>: exposure time in seconds (default: 0.5)
-	 * --gain <0-500>: gain value (default: 100)
-	 * --offset <0-100>: offset value (default: 20)
-	 * --ratio <0.1-1.0>: display scale factor (default: 0.25)
-	 * example: svbcontrols --camera-index 1
-	*/
-	int cameraIndex = -1;
-	SVB_CAMERA_MODE cameraModeOption = SVB_MODE_NORMAL;
-	double exposureSeconds = 0.5;
-	int gainValue = 100;
-	int offsetValue = 20;
-	double displayRatio = 0.25;
-	for (int i = 1; i < argc; i++)
-	{
-		if (strcmp(argv[i], "--camera-index") == 0 && i + 1 < argc)
-		{
-			cameraIndex = atoi(argv[++i]);
-		}
-		else if (strcmp(argv[i], "--camera-mode") == 0 && i + 1 < argc)
-		{
-			const char* mode = argv[++i];
-			if (strcmp(mode, "video") == 0)
-			{
-				cameraModeOption = SVB_MODE_NORMAL;
-			}
-			else if (strcmp(mode, "image") == 0)
-			{
-				cameraModeOption = SVB_MODE_TRIG_SOFT;
-			}
-			else
-			{
-				printf("invalid --camera-mode: %s (use video or image)\n", mode);
-				return 1;
-			}
-		}
-		else if (strcmp(argv[i], "--exp") == 0 && i + 1 < argc)
-		{
-			char* endPtr = NULL;
-			double parsedExposure = strtod(argv[++i], &endPtr);
-			if (endPtr == argv[i] || *endPtr != '\0' || parsedExposure <= 0.0)
-			{
-				printf("invalid --exp: %s (must be a number greater than 0)\n", argv[i]);
-				return 1;
-			}
-			exposureSeconds = parsedExposure;
-		}
-		else if (strcmp(argv[i], "--gain") == 0 && i + 1 < argc)
-		{
-			char* endPtr = NULL;
-			long parsedGain = strtol(argv[++i], &endPtr, 10);
-			if (endPtr == argv[i] || *endPtr != '\0' || parsedGain < 0 || parsedGain > 500)
-			{
-				printf("invalid --gain: %s (must be an integer between 0 and 500)\n", argv[i]);
-				return 1;
-			}
-			gainValue = static_cast<int>(parsedGain);
-		}
-		else if (strcmp(argv[i], "--offset") == 0 && i + 1 < argc)
-		{
-			char* endPtr = NULL;
-			long parsedOffset = strtol(argv[++i], &endPtr, 10);
-			if (endPtr == argv[i] || *endPtr != '\0' || parsedOffset < 0 || parsedOffset > 100)
-			{
-				printf("invalid --offset: %s (must be an integer between 0 and 100)\n", argv[i]);
-				return 1;
-			}
-			offsetValue = static_cast<int>(parsedOffset);
-		}
-		else if (strcmp(argv[i], "--ratio") == 0 && i + 1 < argc)
-		{
-			char* endPtr = NULL;
-			double parsedRatio = strtod(argv[++i], &endPtr);
-			if (endPtr == argv[i] || *endPtr != '\0' || parsedRatio < 0.1 || parsedRatio > 1.0)
-			{
-				printf("invalid --ratio: %s (must be a number between 0.1 and 1.0)\n", argv[i]);
-				return 1;
-			}
-			displayRatio = parsedRatio;
-		}
-		else if (strcmp(argv[i], "--exp") == 0 || strcmp(argv[i], "--gain") == 0 || strcmp(argv[i], "--offset") == 0 || strcmp(argv[i], "--ratio") == 0)
-		{
-			printf("missing value for %s\n", argv[i]);
-			return 1;
-		}
-	}
-
-	if (cameraIndex < 0)
-	{
-		printf("usage: %s --camera-index <index> [--camera-mode <video|image>] [--exp <seconds>] [--gain <0-500>] [--offset <0-100>] [--ratio <0.1-1.0>]\n", argv[0]);
-		return 1;
-	}
-
-	int cameraNum = SVBGetNumOfConnectedCameras();
-	printf("Scan camera number: %d\n\n", cameraNum);
-
-	if (cameraIndex >= cameraNum)
-	{
-		printf("camera index out of range: %d (available: 0-%d)\n", cameraIndex, cameraNum - 1);
-		return 1;
-	}
-
-	SVB_ERROR_CODE ret;
-	int cameraID = -1;
-	std::string cameraFriendlyName;
-	{
-		SVB_CAMERA_INFO cameraInfo;
-		ret = SVBGetCameraInfo(&cameraInfo, cameraIndex);
-		if (ret != SVB_SUCCESS)
-		{
-			printf("get camera info failed.\n");
-			return 1;
-		}
-		else
-		{
-			printf("Friendly name: %s\n", cameraInfo.FriendlyName);
-			printf("Port type: %s\n", cameraInfo.PortType);
-			printf("SN: %s\n", cameraInfo.CameraSN);
-			printf("Device ID: 0x%x\n", cameraInfo.DeviceID);
-			printf("Camera ID: %d\n", cameraInfo.CameraID);
-			cameraID = cameraInfo.CameraID;
-			cameraFriendlyName = cameraInfo.FriendlyName;
-		}
-	}
-
-	//////////////////////////////////////
-	// open the camera
-	ret = SVBOpenCamera(cameraID);
-	if (ret != SVB_SUCCESS)
-	{
-		printf("open camera failed.\n");
-		return -1;
-	}
-
-	// get camera property
-	SVB_CAMERA_PROPERTY cameraProperty;
-	ret = SVBGetCameraProperty(cameraID, &cameraProperty);
+	SVB_ERROR_CODE ret = SVBGetCameraProperty(cameraID, &cameraProperty);
 	assert(ret == SVB_SUCCESS);
 
 	printf("\nCamera Property:\n");
@@ -262,9 +273,13 @@ int main(int argc, char* argv[])
 	}
 	printf("\nMax bit depth: %d\n", cameraProperty.MaxBitDepth);
 	printf("Is trigger camera: %s\n", cameraProperty.IsTriggerCam ? "YES" : "NO");
+	return 0;
+}
 
-
-	// get the number of controls
+// Helper function to print control capabilities for all controls of the camera, and store them in a vector for later use
+static int PrintControlCapabilities(int cameraID)
+{
+	SVB_ERROR_CODE ret;
 	int numOfControls = 0;
 	ret = SVBGetNumOfControls(cameraID, &numOfControls);
 	if (ret != SVB_SUCCESS)
@@ -311,28 +326,25 @@ int main(int argc, char* argv[])
 		printf("First stored control name: %s\n", firstControl.Name);
 	}
 
-	size_t maxBytesPerPixel = 1;
-	for (int i = 0; i < 8; i++)
-	{
-		const SVB_IMG_TYPE format = cameraProperty.SupportedVideoFormat[i];
-		if (format == SVB_IMG_END)
-		{
-			break;
-		}
+	return 0;
+}
 
-		const size_t bytesPerPixel = BytesPerPixelFromImageType(format);
-		if (bytesPerPixel > maxBytesPerPixel)
-		{
-			maxBytesPerPixel = bytesPerPixel;
-		}
-	}
+// Helper function to configure the camera for capture based on the camera properties and command line options
+static int ConfigureCaptureSession(
+	int cameraID,
+	const SVB_CAMERA_PROPERTY& cameraProperty,
+	const CommandLineOptions& options,
+	SVB_IMG_TYPE& outputImageType,
+	std::vector<unsigned char>& frameBuffer)
+{
+	SVB_ERROR_CODE ret;
 
 	ret = SVBSetROIFormat(cameraID, 0, 0, cameraProperty.MaxWidth, cameraProperty.MaxHeight, 1);
 	assert(ret == SVB_SUCCESS);
 
 	// set output image type, if the camera mode is normal mode, we will set it to RGB24 for color camera and Y16 for mono camera; if the camera mode is trigger mode, we will set it to RGB24 for color camera and Y16 for mono camera.
-	const SVB_IMG_TYPE outputImageType =
-		(cameraModeOption == SVB_MODE_NORMAL) ? SVB_IMG_RGB24 :
+	outputImageType =
+		(options.cameraMode == SVB_MODE_NORMAL) ? SVB_IMG_RGB24 :
 		(cameraProperty.IsColorCam ? SVB_IMG_RGB24 : SVB_IMG_Y16);
 	
 	ret = SVBSetOutputImageType(cameraID, outputImageType);
@@ -349,59 +361,113 @@ int main(int argc, char* argv[])
 		cameraProperty.MaxHeight,
 		frameBytesPerPixel);
 
-	std::vector<unsigned char> frameBuffer(frameBufferSize, 0); // Keep a large capture buffer on the heap to avoid stack overflow.
+	frameBuffer.assign(frameBufferSize, 0); // Keep a large capture buffer on the heap to avoid stack overflow.
 
-	printf("cameraMode: %d\r\n", cameraModeOption);
-	ret = SVBSetCameraMode(cameraID, cameraModeOption);
+	printf("cameraMode: %d\r\n", options.cameraMode);
+	ret = SVBSetCameraMode(cameraID, options.cameraMode);
 	assert(ret == SVB_SUCCESS);
 
 	// start video capture
 	ret = SVBStartVideoCapture(cameraID);
 	assert(ret == SVB_SUCCESS);
 
-    // fix for SDK gain error issue
-    // set exposure time
-    SVBSetControlValue(cameraID, SVB_EXPOSURE, static_cast<long>(1 * 1000000L), SVB_FALSE);
+	// fix for SDK gain error issue
+	// set exposure time
+	SVBSetControlValue(cameraID, SVB_EXPOSURE, static_cast<long>(1 * 1000000L), SVB_FALSE);
 
-    ret = SVBSetControlValue(cameraID, SVB_BAD_PIXEL_CORRECTION_ENABLE, 0, SVB_FALSE);
+	ret = SVBSetControlValue(cameraID, SVB_BAD_PIXEL_CORRECTION_ENABLE, 0, SVB_FALSE);
 	assert(ret == SVB_SUCCESS);
 
-    ret = SVBSetControlValue(cameraID, SVB_GAIN, gainValue, SVB_FALSE);
+	ret = SVBSetControlValue(cameraID, SVB_GAIN, options.gainValue, SVB_FALSE);
 	assert(ret == SVB_SUCCESS);
 
-    ret = SVBSetControlValue(cameraID, SVB_BLACK_LEVEL, offsetValue, SVB_FALSE);
+	ret = SVBSetControlValue(cameraID, SVB_BLACK_LEVEL, options.offsetValue, SVB_FALSE);
 	assert(ret == SVB_SUCCESS);
 
-	ret = SVBSetControlValue(cameraID, SVB_EXPOSURE, exposureSeconds*1000*1000, SVB_FALSE);
+	ret = SVBSetControlValue(cameraID, SVB_EXPOSURE, options.exposureSeconds*1000*1000, SVB_FALSE);
 	assert(ret == SVB_SUCCESS);
 
-	const char* prompt = (cameraModeOption == SVB_MODE_NORMAL) ? "Video" : "Image";
+	ret = SVBWhiteBalanceOnce(cameraID);
+	assert(ret == SVB_SUCCESS);
+
+	return 0;
+}
+
+// Main loop to continuously capture frames from the camera, display them, and handle user input for quitting the application
+static int RunPreviewLoop(
+	int cameraID,
+	const SVB_CAMERA_PROPERTY& cameraProperty,
+	const std::string& cameraFriendlyName,
+	const CommandLineOptions& options,
+	SVB_IMG_TYPE outputImageType,
+	std::vector<unsigned char>& frameBuffer)
+{
+	SVB_ERROR_CODE ret;
+	const int exposureTrackbarScale = 10000;
+	int gainTrackbarValue = options.gainValue;
+	int exposureTrackbarValue = static_cast<int>(options.exposureSeconds * exposureTrackbarScale);
+	if (exposureTrackbarValue < 1)
+	{
+		exposureTrackbarValue = 1;
+	}
+	else if (exposureTrackbarValue > 10 * exposureTrackbarScale)
+	{
+		exposureTrackbarValue = 10 * exposureTrackbarScale;
+	}
+	int appliedGainValue = -1;
+	double appliedExposureSeconds = -1.0;
+
+	const char* prompt = (options.cameraMode == SVB_MODE_NORMAL) ? "Video" : "Image";
 	const std::string windowName = cameraFriendlyName.empty() ? "SVB Camera" : cameraFriendlyName;
 
 	cv::namedWindow(windowName, cv::WINDOW_NORMAL);
-	cv::resizeWindow(windowName, cameraProperty.MaxWidth*displayRatio, cameraProperty.MaxHeight*displayRatio);
+#if 1
+	cv::resizeWindow(windowName, 500, 500);
+#else
+	cv::resizeWindow(windowName, cameraProperty.MaxWidth*options.displayRatio, cameraProperty.MaxHeight*options.displayRatio);
+#endif
 	int brightness = 100;
 	int contrast = 100;
 	cv::createTrackbar("Brightness", windowName, &brightness, 200);
 	cv::createTrackbar("Contrast", windowName, &contrast, 200);
+	cv::createTrackbar("Gain", windowName, &gainTrackbarValue, 500);
+	cv::createTrackbar("Exposure(ms)", windowName, &exposureTrackbarValue, 10 * exposureTrackbarScale);
+
 	const int cvType = (outputImageType == SVB_IMG_Y16) ? CV_16UC1 : CV_8UC3;
 	const bool isRgb24 = (outputImageType == SVB_IMG_RGB24);
+
 	cv::Mat frame(static_cast<int>(cameraProperty.MaxHeight), static_cast<int>(cameraProperty.MaxWidth), cvType, frameBuffer.data());
 	cv::Mat displayFrame;
 	cv::Mat previewFrame;
 	cv::Mat adjustedFrame;
+
 	const int maxBitDepth = std::min<int>(cameraProperty.MaxBitDepth, 16);
 	const double maxRawValue = (maxBitDepth > 0) ? (static_cast<double>((1 << maxBitDepth) - 1)) : 65535.0;
 
 	while (g_keepRunning)
 	{
-		if (cameraModeOption == SVB_MODE_TRIG_SOFT)
+		const int currentGainValue = gainTrackbarValue;
+		const double currentExposureSeconds = static_cast<double>(exposureTrackbarValue) / exposureTrackbarScale;
+		if (currentGainValue != appliedGainValue)
+		{
+			ret = SVBSetControlValue(cameraID, SVB_GAIN, currentGainValue, SVB_FALSE);
+			assert(ret == SVB_SUCCESS);
+			appliedGainValue = currentGainValue;
+		}
+		if (currentExposureSeconds != appliedExposureSeconds)
+		{
+			ret = SVBSetControlValue(cameraID, SVB_EXPOSURE, static_cast<long>(currentExposureSeconds * 1000 * 1000), SVB_FALSE);
+			assert(ret == SVB_SUCCESS);
+			appliedExposureSeconds = currentExposureSeconds;
+		}
+
+		if (options.cameraMode == SVB_MODE_TRIG_SOFT)
 		{
 			ret = SVBSendSoftTrigger(cameraID);
 			assert(ret == SVB_SUCCESS);
 		}
 
-		ret = SVBGetVideoData(cameraID, frameBuffer.data(), static_cast<long>(frameBuffer.size()), exposureSeconds*1000*1000);
+		ret = SVBGetVideoData(cameraID, frameBuffer.data(), static_cast<long>(frameBuffer.size()), static_cast<int>(currentExposureSeconds*2* 1000L+500L));
 		if (ret == SVB_SUCCESS)
 		{
 			PrintTimestampedFrameInfo(prompt, frameBuffer.size());
@@ -437,12 +503,106 @@ int main(int argc, char* argv[])
 		}
 	}
 
+	return 0;
+}
+
+static int RunCaptureLoop(int cameraID, const std::string& cameraFriendlyName, const CommandLineOptions& options)
+{
+	SVB_ERROR_CODE ret = SVBOpenCamera(cameraID);
+	if (ret != SVB_SUCCESS)
+	{
+		printf("open camera failed.\n");
+		return -1;
+	}
+
+	SVB_CAMERA_PROPERTY cameraProperty;
+	if (PrintCameraProperty(cameraID, cameraProperty) != 0)
+	{
+		SVBCloseCamera(cameraID);
+		return -1;
+	}
+
+	if (PrintControlCapabilities(cameraID) != 0)
+	{
+		SVBCloseCamera(cameraID);
+		return -1;
+	}
+
+	SVB_IMG_TYPE outputImageType = SVB_IMG_END;
+	std::vector<unsigned char> frameBuffer;
+	if (ConfigureCaptureSession(cameraID, cameraProperty, options, outputImageType, frameBuffer) != 0)
+	{
+		SVBCloseCamera(cameraID);
+		return -1;
+	}
+
+	const int previewResult = RunPreviewLoop(
+		cameraID,
+		cameraProperty,
+		cameraFriendlyName,
+		options,
+		outputImageType,
+		frameBuffer);
+
 	SVBStopVideoCapture(cameraID);
 	cv::destroyAllWindows();
 
 	printf("\nclose camera\n\n");
 	SVBCloseCamera(cameraID);
-	return 0;
+	return previewResult;
+}
+
+// Main function to initialize the camera, set parameters, and start the capture loop
+int main(int argc, char* argv[])
+{
+	// Register the signal handler for SIGINT to allow graceful shutdown when Ctrl+C is pressed
+	signal(SIGINT, HandleSignal);
+
+	CommandLineOptions options;
+	try
+	{
+		options = CommandLineOptions::Parse(argc, argv);
+	}
+	catch (const std::exception& ex)
+	{
+		printf("%s\n", ex.what());
+		return 1;
+	}
+
+	int cameraNum = SVBGetNumOfConnectedCameras();
+	printf("Scan camera number: %d\n\n", cameraNum);
+
+	if (options.cameraIndex >= cameraNum)
+	{
+		printf("camera index out of range: %d (available: 0-%d)\n", options.cameraIndex, cameraNum - 1);
+		return 1;
+	}
+
+	SVB_ERROR_CODE ret;
+	int cameraID = -1;
+	std::string cameraFriendlyName;
+	{
+		SVB_CAMERA_INFO cameraInfo;
+		ret = SVBGetCameraInfo(&cameraInfo, options.cameraIndex);
+		if (ret != SVB_SUCCESS)
+		{
+			printf("get camera info failed.\n");
+			return 1;
+		}
+		else
+		{
+			printf("Friendly name: %s\n", cameraInfo.FriendlyName);
+			printf("Port type: %s\n", cameraInfo.PortType);
+			printf("SN: %s\n", cameraInfo.CameraSN);
+			printf("Device ID: 0x%x\n", cameraInfo.DeviceID);
+			printf("Camera ID: %d\n", cameraInfo.CameraID);
+			cameraID = cameraInfo.CameraID;
+			cameraFriendlyName = cameraInfo.FriendlyName;
+		}
+	}
+
+	// Start the main capture and preview loop
+	return RunCaptureLoop(cameraID, cameraFriendlyName, options);
 }
 
 
