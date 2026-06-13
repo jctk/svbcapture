@@ -20,8 +20,8 @@ all: $(TARGETS)
 run: ./build/svbcapture
 	LIBGL_ALWAYS_SOFTWARE=1 QT_XCB_GL_INTEGRATION=none ./build/svbcapture
 
-./build/svbcapture.o: CXXFLAGS += $(OPENCV_CFLAGS)
-./build/svbcapture:   LDLIBS   += $(OPENCV_LIBS)
+./build/svbcapture.o ./build/svbcapture_mt.o: CXXFLAGS += $(OPENCV_CFLAGS)
+./build/svbcapture ./build/svbcapture_mt:   LDLIBS   += $(OPENCV_LIBS)
 
 %: %.o
 	$(CXX) $< $(LDLIBS) -o $@
