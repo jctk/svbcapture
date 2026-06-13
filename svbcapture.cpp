@@ -491,16 +491,24 @@ static int RunPreviewLoop(
 
 	const char* prompt = (options.cameraMode == SVB_MODE_NORMAL) ? "Video" : "Image";
 	const std::string windowName = cameraProfile.GetFriendlyName().empty() ? "SVB Camera" : cameraProfile.GetFriendlyName();
+	const char* brightnessTrackbarName = "Brightness";
+	const char* contrastTrackbarName = "Contrast";
+	const char* gainTrackbarName = "Gain";
+	const char* exposureTrackbarName = "Exposure(ms)";
 
 	cv::namedWindow(windowName, cv::WINDOW_NORMAL);
 	cv::resizeWindow(windowName, 500, 500);
 
 	int brightness = 100;
 	int contrast = 100;
-	cv::createTrackbar("Brightness", windowName, &brightness, 200);
-	cv::createTrackbar("Contrast", windowName, &contrast, 200);
-	cv::createTrackbar("Gain", windowName, &gainTrackbarValue, maxGainTrackbarValue);
-	cv::createTrackbar("Exposure(ms)", windowName, &exposureTrackbarValue, exposureTrackbarScale);
+	cv::createTrackbar(brightnessTrackbarName, windowName, NULL, 200);
+	cv::createTrackbar(contrastTrackbarName, windowName, NULL, 200);
+	cv::createTrackbar(gainTrackbarName, windowName, NULL, maxGainTrackbarValue);
+	cv::createTrackbar(exposureTrackbarName, windowName, NULL, exposureTrackbarScale);
+	cv::setTrackbarPos(brightnessTrackbarName, windowName, brightness);
+	cv::setTrackbarPos(contrastTrackbarName, windowName, contrast);
+	cv::setTrackbarPos(gainTrackbarName, windowName, gainTrackbarValue);
+	cv::setTrackbarPos(exposureTrackbarName, windowName, exposureTrackbarValue);
 
 	const int cvType = (outputImageType == SVB_IMG_Y16) ? CV_16UC1 : CV_8UC3;
 	const bool isRgb24 = (outputImageType == SVB_IMG_RGB24);
@@ -515,8 +523,10 @@ static int RunPreviewLoop(
 
 	while (g_keepRunning)
 	{
-		const int currentGainValue = gainTrackbarValue;
-		const long currentExposureMSeconds = exposureTrackbarValue;
+		brightness = cv::getTrackbarPos(brightnessTrackbarName, windowName);
+		contrast = cv::getTrackbarPos(contrastTrackbarName, windowName);
+		const int currentGainValue = cv::getTrackbarPos(gainTrackbarName, windowName);
+		const long currentExposureMSeconds = cv::getTrackbarPos(exposureTrackbarName, windowName);
 		if (currentGainValue != appliedGainValue)
 		{
 			ret = SVBSetControlValue(cameraID, SVB_GAIN, currentGainValue, SVB_FALSE);
