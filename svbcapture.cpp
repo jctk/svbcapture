@@ -210,6 +210,98 @@ public:
 	}
 };
 
+// Class to hold camera information and control capabilities, and provide helper functions to load and access them
+class CameraProfile
+{
+public:
+	SVB_CAMERA_INFO cameraInfo;
+	std::vector<SVB_CONTROL_CAPS> controlCapsList;
+
+	CameraProfile()
+		: controlCapsIndexByType(SVB_BAD_PIXEL_CORRECTION_THRESHOLD + 1, -1)
+	{
+		memset(&cameraInfo, 0, sizeof(cameraInfo));
+	}
+
+	static CameraProfile Load(int cameraIndex)
+	{
+		CameraProfile profile;
+		SVB_ERROR_CODE ret = SVBGetCameraInfo(&profile.cameraInfo, cameraIndex);
+		if (ret != SVB_SUCCESS)
+		{
+			throw std::runtime_error("get camera info failed.");
+		}
+
+		return profile;
+	}
+
+	int GetCameraID() const
+	{
+		return cameraInfo.CameraID;
+	}
+
+	std::string GetFriendlyName() const
+	{
+		return cameraInfo.FriendlyName;
+	}
+
+	int LoadControlCaps()
+	{
+		SVB_ERROR_CODE ret;
+		int numOfControls = 0;
+		ret = SVBGetNumOfControls(GetCameraID(), &numOfControls);
+		if (ret != SVB_SUCCESS)
+		{
+			printf("\nget number of controls failed.\n");
+			return -1;
+		}
+
+		printf("\nnumber of controls: %d\n", numOfControls);
+		controlCapsList.clear();
+		controlCapsList.reserve(numOfControls);
+		std::fill(controlCapsIndexByType.begin(), controlCapsIndexByType.end(), -1);
+
+		for (int i = 0; i < numOfControls; i++)
+		{
+			SVB_CONTROL_CAPS caps;
+			ret = SVBGetControlCaps(GetCameraID(), i, &caps);
+			if (ret != SVB_SUCCESS)
+			{
+				printf("get control caps failed.\n");
+				continue;
+			}
+
+			const int storedIndex = static_cast<int>(controlCapsList.size());
+			controlCapsList.push_back(caps);
+			if (caps.ControlType >= 0 && caps.ControlType < static_cast<int>(controlCapsIndexByType.size()))
+			{
+				controlCapsIndexByType[caps.ControlType] = storedIndex;
+			}
+		}
+
+		return 0;
+	}
+
+	const SVB_CONTROL_CAPS* FindControlCaps(SVB_CONTROL_TYPE controlType) const
+	{
+		if (controlType < 0 || controlType >= static_cast<int>(controlCapsIndexByType.size()))
+		{
+			return NULL;
+		}
+
+		const int index = controlCapsIndexByType[controlType];
+		if (index < 0 || index >= static_cast<int>(controlCapsList.size()))
+		{
+			return NULL;
+		}
+
+		return &controlCapsList[index];
+	}
+
+private:
+	std::vector<int> controlCapsIndexByType;
+};
+
 // Helper function to determine bytes per pixel based on the image type
 static size_t BytesPerPixelFromImageType(SVB_IMG_TYPE imgType)
 {
@@ -276,37 +368,15 @@ static int PrintCameraProperty(int cameraID, SVB_CAMERA_PROPERTY& cameraProperty
 	return 0;
 }
 
-// Helper function to print control capabilities for all controls of the camera, and store them in a vector for later use
-static int PrintControlCapabilities(int cameraID)
+// Helper function to print control capabilities for all controls of the camera profile.
+static int PrintControlCapabilities(const CameraProfile& cameraProfile)
 {
-	SVB_ERROR_CODE ret;
-	int numOfControls = 0;
-	ret = SVBGetNumOfControls(cameraID, &numOfControls);
-	if (ret != SVB_SUCCESS)
+	for (size_t i = 0; i < cameraProfile.controlCapsList.size(); i++)
 	{
-		printf("\nget number of controls failed.\n");
-		return -1;
-	}
-	else {
-		printf("\nnumber of controls: %d\n", numOfControls);
-	}
-
-	std::vector<SVB_CONTROL_CAPS> controlCapsList;
-	controlCapsList.reserve(numOfControls);
-
-	// get the controls information
-	for (int i = 0; i < numOfControls; i++)
-	{
-		SVB_CONTROL_CAPS caps;
-		ret = SVBGetControlCaps(cameraID, i, &caps);
-		if (ret != SVB_SUCCESS)
-		{
-			printf("get control caps failed.\n");
-			continue;
-		}
+		const SVB_CONTROL_CAPS& caps = cameraProfile.controlCapsList[i];
 		printf(
 			"control index: %d, type: %d (%s), name: %s, desc: %s, min/max/default: %ld/%ld/%ld, auto: %s, writable: %s\n",
-			i,
+			static_cast<int>(i),
 			caps.ControlType,
 			GetControlTypeName((SVB_CONTROL_TYPE)caps.ControlType),
 			caps.Name,
@@ -316,13 +386,12 @@ static int PrintControlCapabilities(int cameraID)
 			caps.DefaultValue,
 			caps.IsAutoSupported ? "YES" : "NO",
 			caps.IsWritable ? "YES" : "NO");
-		controlCapsList.push_back(caps);
 	}	
 
-	if (!controlCapsList.empty())
+	if (!cameraProfile.controlCapsList.empty())
 	{
-		const SVB_CONTROL_CAPS& firstControl = controlCapsList[0];
-		printf("\nStored controls: %zu\n", controlCapsList.size());
+		const SVB_CONTROL_CAPS& firstControl = cameraProfile.controlCapsList[0];
+		printf("\nStored controls: %zu\n", cameraProfile.controlCapsList.size());
 		printf("First stored control name: %s\n", firstControl.Name);
 	}
 
@@ -384,7 +453,7 @@ static int ConfigureCaptureSession(
 	ret = SVBSetControlValue(cameraID, SVB_BLACK_LEVEL, options.offsetValue, SVB_FALSE);
 	assert(ret == SVB_SUCCESS);
 
-	ret = SVBSetControlValue(cameraID, SVB_EXPOSURE, options.exposureSeconds*1000*1000, SVB_FALSE);
+	ret = SVBSetControlValue(cameraID, SVB_EXPOSURE, options.exposureSeconds*1000L*1000L, SVB_FALSE);
 	assert(ret == SVB_SUCCESS);
 
 	ret = SVBWhiteBalanceOnce(cameraID);
@@ -397,41 +466,41 @@ static int ConfigureCaptureSession(
 static int RunPreviewLoop(
 	int cameraID,
 	const SVB_CAMERA_PROPERTY& cameraProperty,
-	const std::string& cameraFriendlyName,
+	const CameraProfile& cameraProfile,
 	const CommandLineOptions& options,
 	SVB_IMG_TYPE outputImageType,
 	std::vector<unsigned char>& frameBuffer)
 {
 	SVB_ERROR_CODE ret;
 	const int exposureTrackbarScale = 10000;
+	const SVB_CONTROL_CAPS* gainCaps = cameraProfile.FindControlCaps(SVB_GAIN);
+	const SVB_CONTROL_CAPS* exposureCaps = cameraProfile.FindControlCaps(SVB_EXPOSURE);
 	int gainTrackbarValue = options.gainValue;
-	int exposureTrackbarValue = static_cast<int>(options.exposureSeconds * exposureTrackbarScale);
+	int exposureTrackbarValue = static_cast<int>(options.exposureSeconds * 1000); // convert seconds to milliseconds for the trackbar
+	const int maxGainTrackbarValue = (gainCaps != NULL) ? static_cast<int>(gainCaps->MaxValue) : 500;
 	if (exposureTrackbarValue < 1)
 	{
 		exposureTrackbarValue = 1;
 	}
-	else if (exposureTrackbarValue > 10 * exposureTrackbarScale)
+	else if (exposureTrackbarValue > exposureTrackbarScale)
 	{
-		exposureTrackbarValue = 10 * exposureTrackbarScale;
+		exposureTrackbarValue = exposureTrackbarScale;
 	}
 	int appliedGainValue = -1;
-	double appliedExposureSeconds = -1.0;
+	double appliedExposureMSeconds = -1.0;
 
 	const char* prompt = (options.cameraMode == SVB_MODE_NORMAL) ? "Video" : "Image";
-	const std::string windowName = cameraFriendlyName.empty() ? "SVB Camera" : cameraFriendlyName;
+	const std::string windowName = cameraProfile.GetFriendlyName().empty() ? "SVB Camera" : cameraProfile.GetFriendlyName();
 
 	cv::namedWindow(windowName, cv::WINDOW_NORMAL);
-#if 1
 	cv::resizeWindow(windowName, 500, 500);
-#else
-	cv::resizeWindow(windowName, cameraProperty.MaxWidth*options.displayRatio, cameraProperty.MaxHeight*options.displayRatio);
-#endif
+
 	int brightness = 100;
 	int contrast = 100;
 	cv::createTrackbar("Brightness", windowName, &brightness, 200);
 	cv::createTrackbar("Contrast", windowName, &contrast, 200);
-	cv::createTrackbar("Gain", windowName, &gainTrackbarValue, 500);
-	cv::createTrackbar("Exposure(ms)", windowName, &exposureTrackbarValue, 10 * exposureTrackbarScale);
+	cv::createTrackbar("Gain", windowName, &gainTrackbarValue, maxGainTrackbarValue);
+	cv::createTrackbar("Exposure(ms)", windowName, &exposureTrackbarValue, exposureTrackbarScale);
 
 	const int cvType = (outputImageType == SVB_IMG_Y16) ? CV_16UC1 : CV_8UC3;
 	const bool isRgb24 = (outputImageType == SVB_IMG_RGB24);
@@ -447,18 +516,18 @@ static int RunPreviewLoop(
 	while (g_keepRunning)
 	{
 		const int currentGainValue = gainTrackbarValue;
-		const double currentExposureSeconds = static_cast<double>(exposureTrackbarValue) / exposureTrackbarScale;
+		const long currentExposureMSeconds = exposureTrackbarValue;
 		if (currentGainValue != appliedGainValue)
 		{
 			ret = SVBSetControlValue(cameraID, SVB_GAIN, currentGainValue, SVB_FALSE);
 			assert(ret == SVB_SUCCESS);
 			appliedGainValue = currentGainValue;
 		}
-		if (currentExposureSeconds != appliedExposureSeconds)
+		if (currentExposureMSeconds != appliedExposureMSeconds)
 		{
-			ret = SVBSetControlValue(cameraID, SVB_EXPOSURE, static_cast<long>(currentExposureSeconds * 1000 * 1000), SVB_FALSE);
+			ret = SVBSetControlValue(cameraID, SVB_EXPOSURE, static_cast<long>(currentExposureMSeconds*1000L), SVB_FALSE);
 			assert(ret == SVB_SUCCESS);
-			appliedExposureSeconds = currentExposureSeconds;
+			appliedExposureMSeconds = currentExposureMSeconds;
 		}
 
 		if (options.cameraMode == SVB_MODE_TRIG_SOFT)
@@ -467,7 +536,7 @@ static int RunPreviewLoop(
 			assert(ret == SVB_SUCCESS);
 		}
 
-		ret = SVBGetVideoData(cameraID, frameBuffer.data(), static_cast<long>(frameBuffer.size()), static_cast<int>(currentExposureSeconds*2* 1000L+500L));
+		ret = SVBGetVideoData(cameraID, frameBuffer.data(), static_cast<long>(frameBuffer.size()), static_cast<int>(currentExposureMSeconds*2+500L));
 		if (ret == SVB_SUCCESS)
 		{
 			PrintTimestampedFrameInfo(prompt, frameBuffer.size());
@@ -503,8 +572,10 @@ static int RunPreviewLoop(
 	return 0;
 }
 
-static int RunCaptureLoop(int cameraID, const std::string& cameraFriendlyName, const CommandLineOptions& options)
+// Main function to initialize the camera, set parameters, and start the capture loop
+static int RunCaptureLoop(const CameraProfile& cameraProfile, const CommandLineOptions& options)
 {
+	const int cameraID = cameraProfile.GetCameraID();
 	SVB_ERROR_CODE ret = SVBOpenCamera(cameraID);
 	if (ret != SVB_SUCCESS)
 	{
@@ -519,7 +590,14 @@ static int RunCaptureLoop(int cameraID, const std::string& cameraFriendlyName, c
 		return -1;
 	}
 
-	if (PrintControlCapabilities(cameraID) != 0)
+	CameraProfile loadedCameraProfile = cameraProfile;
+	if (loadedCameraProfile.LoadControlCaps() != 0)
+	{
+		SVBCloseCamera(cameraID);
+		return -1;
+	}
+
+	if (PrintControlCapabilities(loadedCameraProfile) != 0)
 	{
 		SVBCloseCamera(cameraID);
 		return -1;
@@ -536,7 +614,7 @@ static int RunCaptureLoop(int cameraID, const std::string& cameraFriendlyName, c
 	const int previewResult = RunPreviewLoop(
 		cameraID,
 		cameraProperty,
-		cameraFriendlyName,
+		loadedCameraProfile,
 		options,
 		outputImageType,
 		frameBuffer);
@@ -575,31 +653,25 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
-	SVB_ERROR_CODE ret;
-	int cameraID = -1;
-	std::string cameraFriendlyName;
+	CameraProfile cameraProfile;
+	try
 	{
-		SVB_CAMERA_INFO cameraInfo;
-		ret = SVBGetCameraInfo(&cameraInfo, options.cameraIndex);
-		if (ret != SVB_SUCCESS)
-		{
-			printf("get camera info failed.\n");
-			return 1;
-		}
-		else
-		{
-			printf("Friendly name: %s\n", cameraInfo.FriendlyName);
-			printf("Port type: %s\n", cameraInfo.PortType);
-			printf("SN: %s\n", cameraInfo.CameraSN);
-			printf("Device ID: 0x%x\n", cameraInfo.DeviceID);
-			printf("Camera ID: %d\n", cameraInfo.CameraID);
-			cameraID = cameraInfo.CameraID;
-			cameraFriendlyName = cameraInfo.FriendlyName;
-		}
+		cameraProfile = CameraProfile::Load(options.cameraIndex);
+	}
+	catch (const std::exception& ex)
+	{
+		printf("%s\n", ex.what());
+		return 1;
 	}
 
+	printf("Friendly name: %s\n", cameraProfile.cameraInfo.FriendlyName);
+	printf("Port type: %s\n", cameraProfile.cameraInfo.PortType);
+	printf("SN: %s\n", cameraProfile.cameraInfo.CameraSN);
+	printf("Device ID: 0x%x\n", cameraProfile.cameraInfo.DeviceID);
+	printf("Camera ID: %d\n", cameraProfile.cameraInfo.CameraID);
+
 	// Start the main capture and preview loop
-	return RunCaptureLoop(cameraID, cameraFriendlyName, options);
+	return RunCaptureLoop(cameraProfile, options);
 }
 
 
