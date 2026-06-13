@@ -473,10 +473,7 @@ static int RunPreviewLoop(
 			PrintTimestampedFrameInfo(prompt, frameBuffer.size());
 
 			{
-				if (isRgb24)
-					cv::cvtColor(frame, displayFrame, cv::COLOR_RGB2BGR);
-				else
-					displayFrame = frame;
+				displayFrame = frame;
 
 				if (displayFrame.depth() == CV_16U)
 					displayFrame.convertTo(previewFrame, CV_8U, 255.0 / maxRawValue);
